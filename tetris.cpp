@@ -23,11 +23,11 @@ struct ScoreEntry {
 // Tetromino class: Represents a single tetromino with shape, position, and behavior
 class Tetromino {
 public:
-    bool shape[4][4];       // 4x4 grid defining the tetromino shape
-    int x, y;               // Position on the game board
-    char color;             // ANSI color code for rendering
-    int id;                 // Unique ID for identifying tetromino type
-    int centerX, centerY;   // Rotation pivot point
+    bool shape[4][4];
+    int x, y;
+    char color;
+    int id;
+    int centerX, centerY;
 
     Tetromino() : x(3), y(0), color(1), id(0), centerX(0), centerY(0) {
         for (int i = 0; i < 4; i++)
@@ -131,6 +131,7 @@ private:
     atomic<bool> fall{false};
     string playerName;
     vector<ScoreEntry> leaderboard;
+    atomic<bool> inputActive{true}; // Control input thread
 
     vector<vector<vector<bool>>> shapes = {
         {{1, 1, 0, 0}, {1, 1, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}}, // O
@@ -164,7 +165,6 @@ public:
         spawnNext();
     }
 
-    // Temporarily enable terminal echo for input visibility
     void enableEcho(struct termios& old) {
         struct termios current;
         tcgetattr(0, &current);
@@ -173,7 +173,6 @@ public:
         tcsetattr(0, TCSANOW, &current);
     }
 
-    // Restore terminal settings for gameplay
     void disableEcho(struct termios& old) {
         tcsetattr(0, TCSANOW, &old);
     }
@@ -238,31 +237,30 @@ public:
     }
 
     void handleInput(char input) {
-        if (input == 'p' || input == '\e') { // Pause/Unpause
+        if (input == 'p' || input == '\e') {
             paused = !paused;
             return;
         }
         if (gameOver || paused) {
-            if (input == ' ' && gameOver) { // Restart only on game over
+            if (input == ' ' && gameOver) {
                 reset();
                 paused = false;
             }
             return;
         }
 
-        // Movement controls
-        if (input == 'h' || input == 20) { // Left (h or Left Arrow)
+        if (input == 'h' || input == 20) {
             if (!board.checkCollision(current, -1, 0)) current.x--;
-        } else if (input == 'l' || input == 19) { // Right (l or Right Arrow)
+        } else if (input == 'l' || input == 19) {
             if (!board.checkCollision(current, 1, 0)) current.x++;
-        } else if (input == 'j' || input == 18) { // Down (j or Down Arrow)
+        } else if (input == 'j' || input == 18) {
             if (!board.checkCollision(current, 0, 1)) current.y++;
             else solidifyAndSpawn();
-        } else if (input == 'k' || input == 17) { // Rotate (k or Up Arrow)
+        } else if (input == 'k' || input == 17) {
             Tetromino temp = current;
             temp.rotate();
             if (!board.checkCollision(temp)) current = temp;
-        } else if (input == ' ') { // Drop (Spacebar)
+        } else if (input == ' ') {
             while (!board.checkCollision(current, 0, 1)) current.y++;
             solidifyAndSpawn();
         }
@@ -384,14 +382,21 @@ public:
     }
 
     bool handleGameOver(struct termios& oldTerm) {
+        inputActive = false; // Pause input thread
         system("clear");
         displayLeaderboard();
         cout << "Your score: " << score << "\n";
         cout << "Game Over! Do you want to restart? (1 = Yes, 0 = No): ";
         enableEcho(oldTerm);
+
+        // Clear any residual input
+        cin.clear();
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
+
         int choice;
         cin >> choice;
         disableEcho(oldTerm);
+        inputActive = true; // Resume input thread
 
         if (cin.fail() || (choice != 0 && choice != 1)) {
             cin.clear();
@@ -430,20 +435,23 @@ public:
     }
 };
 
-// Input thread: Captures raw input with better handling
+// Input thread: Captures raw input with pause control
 atomic<char> input{0};
+atomic<bool> inputActive{true}; // Global flag to control input thread
 void inputThread() {
     while (true) {
-        char tmp[3] = {0}; // Reset buffer each iteration
-        ssize_t bytesRead = read(0, tmp, 3);
-        if (bytesRead > 0) {
-            if (tmp[0] == '\e' && tmp[1] == '[') { // Arrow keys
-                input = tmp[2] - 48; // Convert to control code (17-20)
-            } else {
-                input = tmp[0]; // Regular keys (e.g., 'p', ' ')
+        if (inputActive) {
+            char tmp[3] = {0};
+            ssize_t bytesRead = read(0, tmp, 3);
+            if (bytesRead > 0) {
+                if (tmp[0] == '\e' && tmp[1] == '[') {
+                    input = tmp[2] - 48; // Arrow keys (17-20)
+                } else {
+                    input = tmp[0]; // Regular keys
+                }
             }
         }
-        this_thread::sleep_for(milliseconds(10)); // Prevent CPU overload
+        this_thread::sleep_for(milliseconds(10));
     }
 }
 
@@ -452,11 +460,10 @@ int main() {
     struct termios old, current;
     tcgetattr(0, &old);
     current = old;
-    current.c_lflag &= ~ICANON; // Non-canonical input
-    current.c_lflag &= ~ECHO;   // Disable echo
-    tcsetattr(0, TCSANOW, &current); // Apply initial settings
+    current.c_lflag &= ~ICANON;
+    current.c_lflag &= ~ECHO;
+    tcsetattr(0, TCSANOW, &current);
 
-    // Get player name with echo enabled
     cout << "Enter your name: ";
     game.enableEcho(old);
     string name;
@@ -464,21 +471,18 @@ int main() {
     game.setPlayerName(name);
     game.disableEcho(old);
 
-    // Show menu
     game.menu(old);
 
-    // Ensure terminal is in gameplay mode
-    tcsetattr(0, TCSANOW, &current); // Reapply non-echo, non-canonical settings
+    tcsetattr(0, TCSANOW, &current);
     system("clear");
 
-    // Start game threads
     thread(inputThread).detach();
     game.startFallThread();
 
     while (true) {
         while (game.isRunning()) {
             game.handleInput(input);
-            input = 0; // Clear input after processing
+            input = 0;
             game.update();
             game.draw();
             this_thread::sleep_for(milliseconds(10));
@@ -487,7 +491,6 @@ int main() {
         system("clear");
     }
 
-    // Restore terminal settings
     tcsetattr(0, TCSANOW, &old);
     system("clear");
     cout << "\e[?25h" << flush;
